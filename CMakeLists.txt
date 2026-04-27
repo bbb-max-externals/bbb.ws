@@ -9,6 +9,11 @@ if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "macOS architecture" FORCE)
 endif()
 
+# --- static CRT on Windows (match min-api's /MT, must be set before IXWebSocket) ---
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+endif()
+
 # --- load bbb_add_external() ---
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bbb_external.cmake)
 
