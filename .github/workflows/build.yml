@@ -31,7 +31,7 @@ jobs:
           submodules: recursive
 
       - name: Install mbedTLS via vcpkg
-        run: vcpkg install mbedtls:x64-windows-release
+        run: vcpkg install mbedtls:x64-windows
 
       - name: Configure and Build
         run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DUSE_TLS=1 -DUSE_MBED_TLS=1 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" && cmake --build build --config Release
