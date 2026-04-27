@@ -3,3 +3,4 @@ externals/
 .DS_Store
 *.mxo
 *.mxe64
+tests/node_modules/
