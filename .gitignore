@@ -1,0 +1,5 @@
+build/
+externals/
+.DS_Store
+*.mxo
+*.mxe64

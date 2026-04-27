@@ -1,0 +1,24 @@
+{
+    "title": "bbb.ws",
+    "description": "WebSocket client and server externals for Max/MSP",
+    "author": "ISHII 2bit",
+    "website": "",
+    "extends": "",
+    "extensible": 0,
+    "homepatcher": "",
+    "max_version_min": "8.0",
+    "os": {
+        "macintosh": {
+            "externals": [
+                "externals/"
+            ],
+            "help": [
+                "help/"
+            ]
+        }
+    },
+    "filelist": {
+        "externals/bbb.ws.client.mxo": {},
+        "externals/bbb.ws.server.mxo": {}
+    }
+}
