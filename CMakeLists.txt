@@ -4,6 +4,11 @@ project(bbb.ws)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --- universal binary (macOS) — must be set BEFORE add_subdirectory(IXWebSocket) ---
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "macOS architecture" FORCE)
+endif()
+
 # --- load bbb_add_external() ---
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bbb_external.cmake)
 

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <vector>
 #include <string>
+#include <atomic>
 
 using namespace c74::min;
 
@@ -17,7 +18,7 @@ static std::string to_string(const symbol& s) {
 }
 
 struct pending_message {
-    enum type_t { text_msg, binary_msg, status_msg } type;
+    enum type_t { text_msg, binary_msg, status_msg, reconnect_msg } type;
     std::string data;
     std::vector<std::uint8_t> bytes;
     int close_code;
@@ -71,7 +72,7 @@ public:
     message<> send_msg{this, "send", "Send text frame",
         MIN_FUNCTION {
             if(args.size() < 1) return {};
-            std::string text = to_string(args[0]);
+            std::string text = format_atoms(args);
             m_ws.send(text);
             return {};
         }
@@ -91,19 +92,7 @@ public:
 
     message<> anything_msg{this, "anything", "Send message (selector + args as text)",
         MIN_FUNCTION {
-            std::string text = to_string(args[0]);
-            for(size_t i = 1; i < args.size(); i++) {
-                text += " ";
-                if(args[i].a_type == c74::max::A_LONG) {
-                    text += std::to_string(static_cast<int>(args[i]));
-                }
-                else if(args[i].a_type == c74::max::A_FLOAT) {
-                    text += std::to_string(static_cast<double>(args[i]));
-                }
-                else if(args[i].a_type == c74::max::A_SYM) {
-                    text += to_string(args[i]);
-                }
-            }
+            std::string text = format_atoms(args);
             if(binary) {
                 m_ws.send(text, true);
             }
@@ -115,10 +104,12 @@ public:
     };
 
     bbb_ws_client() {
+        ix::initNetSystem();
         m_init_timer.delay(0);
     }
 
     ~bbb_ws_client() {
+        m_shutting_down = true;
         m_reconnect_timer.stop();
         m_ws.stop();
     }
@@ -127,6 +118,10 @@ private:
     ix::WebSocket m_ws;
     std::vector<pending_message> m_pending;
     std::mutex m_pending_mtx;
+    std::atomic<bool> m_shutting_down{false};
+
+    std::string m_connected_url;
+    int m_reconnect_interval_snapshot{0};
 
     timer<timer_options::defer_delivery> m_init_timer{this,
         MIN_FUNCTION {
@@ -167,6 +162,9 @@ private:
                     case pending_message::status_msg:
                         status_out.send(symbol(msg.data));
                         break;
+                    case pending_message::reconnect_msg:
+                        m_reconnect_timer.delay(msg.close_code);
+                        break;
                 }
             }
             return {};
@@ -174,9 +172,29 @@ private:
     };
 
     void push_pending(pending_message&& msg) {
-        auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
-        m_pending.push_back(std::move(msg));
+        if(m_shutting_down) return;
+        {
+            auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
+            m_pending.push_back(std::move(msg));
+        }
         m_queue.set();
+    }
+
+    static std::string format_atoms(const atoms& args) {
+        std::string text;
+        for(std::size_t i = 0; i < args.size(); i++) {
+            if(i > 0) text += " ";
+            if(args[i].a_type == c74::max::A_LONG) {
+                text += std::to_string(static_cast<int>(args[i]));
+            }
+            else if(args[i].a_type == c74::max::A_FLOAT) {
+                text += std::to_string(static_cast<double>(args[i]));
+            }
+            else if(args[i].a_type == c74::max::A_SYM) {
+                text += to_string(args[i]);
+            }
+        }
+        return text;
     }
 
     void do_connect() {
@@ -189,6 +207,9 @@ private:
         }
 
         m_ws.stop();
+
+        m_connected_url = u;
+        m_reconnect_interval_snapshot = static_cast<int>(reconnect_interval);
 
         m_ws.setUrl(u);
 
@@ -203,6 +224,8 @@ private:
         }
 
         m_ws.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
+            if(m_shutting_down) return;
+
             if(msg->type == ix::WebSocketMessageType::Message) {
                 if(msg->binary) {
                     pending_message pm;
@@ -220,7 +243,7 @@ private:
             else if(msg->type == ix::WebSocketMessageType::Open) {
                 pending_message pm;
                 pm.type = pending_message::status_msg;
-                pm.data = "connected " + to_string(url);
+                pm.data = "connected " + m_connected_url;
                 push_pending(std::move(pm));
             }
             else if(msg->type == ix::WebSocketMessageType::Close) {
@@ -230,9 +253,12 @@ private:
                 pm.data = "disconnected " + std::to_string(msg->closeInfo.code)
                     + " " + msg->closeInfo.reason;
                 push_pending(std::move(pm));
-                int interval = static_cast<int>(reconnect_interval);
-                if(0 < interval) {
-                    m_reconnect_timer.delay(interval);
+
+                if(0 < m_reconnect_interval_snapshot) {
+                    pending_message rpm;
+                    rpm.type = pending_message::reconnect_msg;
+                    rpm.close_code = m_reconnect_interval_snapshot;
+                    push_pending(std::move(rpm));
                 }
             }
             else if(msg->type == ix::WebSocketMessageType::Error) {

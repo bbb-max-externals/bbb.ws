@@ -124,6 +124,7 @@ public:
 	}
 
 	~bbb_ws_server() {
+		m_shutting_down = true;
 		stop_server();
 	}
 
@@ -140,6 +141,9 @@ private:
 	std::map<int, std::weak_ptr<ix::WebSocket>> m_id_to_ws;
 	std::mutex m_clients_mtx;
 	std::atomic<int> m_next_id;
+	std::atomic<bool> m_shutting_down{false};
+
+	int m_max_clients_snapshot{10};
 
 	std::vector<pending_message> m_pending;
 	std::mutex m_pending_mtx;
@@ -157,6 +161,7 @@ private:
 	};
 
 	void push_pending(pending_message&& msg) {
+		if(m_shutting_down) return;
 		{
 			auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
 			m_pending.push_back(std::move(msg));
@@ -186,6 +191,7 @@ private:
 
 		int port_val = static_cast<int>(port);
 		auto ip = to_string(bind_ip);
+		m_max_clients_snapshot = static_cast<int>(max_clients);
 		m_server = std::make_unique<ix::WebSocketServer>(port_val, ip);
 
 		if(static_cast<bool>(tls_attr)) {
@@ -198,13 +204,15 @@ private:
 
 		m_server->setOnConnectionCallback(
 			[this](std::weak_ptr<ix::WebSocket> ws_weak, std::shared_ptr<ix::ConnectionState>) {
+				if(m_shutting_down) return;
+
 				auto ws = ws_weak.lock();
 				if(!ws) return;
 				uintptr_t key = reinterpret_cast<uintptr_t>(ws.get());
 				int id = m_next_id.fetch_add(1);
 				{
-					auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
-				if(static_cast<int>(m_id_to_ws.size()) >= static_cast<int>(max_clients)) {
+				auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
+				if(static_cast<int>(m_id_to_ws.size()) >= m_max_clients_snapshot) {
 						ws->close(1013, "Max clients reached");
 						return;
 					}
@@ -217,6 +225,8 @@ private:
 
 		m_server->setOnClientMessageCallback(
 			[this](std::shared_ptr<ix::ConnectionState>, ix::WebSocket& ws, const ix::WebSocketMessagePtr& msg) {
+				if(m_shutting_down) return;
+
 				uintptr_t key = reinterpret_cast<uintptr_t>(&ws);
 
 				if(msg->type == ix::WebSocketMessageType::Message) {
@@ -272,23 +282,32 @@ private:
 	}
 
 	void broadcast(const std::string& text) {
-		auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
-		for(auto& [id, ws_weak] : m_id_to_ws) {
-			auto ws = ws_weak.lock();
-			if(ws) ws->send(text);
+		std::vector<std::shared_ptr<ix::WebSocket>> targets;
+		{
+			auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
+			for(auto& [id, ws_weak] : m_id_to_ws) {
+				auto ws = ws_weak.lock();
+				if(ws) targets.push_back(std::move(ws));
+			}
+		}
+		for(auto& ws : targets) {
+			ws->send(text);
 		}
 	}
 
 	void send_to_client(int client_id, const std::string& text) {
-		auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
-		auto it = m_id_to_ws.find(client_id);
-		if(it == m_id_to_ws.end()) {
-			cerr << "bbb.ws.server: client " << client_id << " not found" << endl;
-			return;
+		std::shared_ptr<ix::WebSocket> target;
+		{
+			auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
+			auto it = m_id_to_ws.find(client_id);
+			if(it == m_id_to_ws.end()) {
+				cerr << "bbb.ws.server: client " << client_id << " not found" << endl;
+				return;
+			}
+			target = it->second.lock();
 		}
-		auto ws = it->second.lock();
-		if(ws) {
-			ws->send(text);
+		if(target) {
+			target->send(text);
 		}
 		else {
 			cerr << "bbb.ws.server: client " << client_id << " disconnected" << endl;
@@ -316,7 +335,6 @@ private:
 		if(ws_to_close) {
 			ws_to_close->close(1000, "Closed by server");
 		}
-		push_pending({pending_message::status, "disconnected", {}, client_id});
 	}
 
 	void drain_pending() {
