@@ -2,7 +2,8 @@
   "private": true,
   "scripts": {
     "server": "node server.js",
-    "client": "node client.js"
+    "client": "node client.js",
+    "test": "node loopback.test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

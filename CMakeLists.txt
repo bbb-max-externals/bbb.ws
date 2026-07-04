@@ -3,6 +3,7 @@ project(bbb.ws)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+option(BBB_WS_BUILD_TESTS "Build bbb.ws loopback tests" OFF)
 
 # --- universal binary (macOS) — must be set BEFORE add_subdirectory(IXWebSocket) ---
 if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
@@ -50,5 +51,14 @@ foreach(project_dir ${PROJECT_DIRS})
 		add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/source/projects/${project_dir})
 	endif()
 endforeach()
+
+if(BBB_WS_BUILD_TESTS)
+	enable_testing()
+	find_program(NODE_EXECUTABLE node REQUIRED)
+	add_test(
+		NAME bbb_ws_loopback_tests
+		COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/loopback.test.js
+	)
+endif()
 
 set(CMAKE_SUPPRESS_REGENERATION true)
