@@ -20,7 +20,7 @@ Both support TLS (WSS), auto-reconnect, and subprotocol negotiation.
 ### Build
 
 ```bash
-git clone --recursive https://github.com/2bbb/bbb.ws.git
+git clone --recursive https://github.com/bbb-max-externals/bbb.ws.git
 cd bbb.ws
 cmake -B build
 cmake --build build --config Release
