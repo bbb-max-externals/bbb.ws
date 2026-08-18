@@ -1,5 +1,8 @@
 # bbb.ws
 
+> [!WARNING]
+> This repository is published as AI-assisted, insufficiently tested work in progress ("AI slop"). Treat it as experimental. Correctness, stability, compatibility, and fitness for production use are not guaranteed.
+
 WebSocket client and server externals for [Max/MSP](https://cycling74.com/products/max).
 
 ## Overview
