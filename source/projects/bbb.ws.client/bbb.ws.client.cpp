@@ -119,6 +119,11 @@ private:
     std::vector<pending_message> m_pending;
     std::mutex m_pending_mtx;
     std::atomic<bool> m_shutting_down{false};
+    // Set before an intentional m_ws.stop() (connect/disconnect/shutdown) so the
+    // resulting Close event does not schedule an auto-reconnect. Consumed by the
+    // Close handler and cleared on a successful Open, so a genuine unexpected
+    // drop still reconnects.
+    std::atomic<bool> m_intentional_close{false};
 
     std::string m_connected_url;
     int m_reconnect_interval_snapshot{0};
@@ -206,6 +211,7 @@ private:
             return;
         }
 
+        m_intentional_close = true;
         m_ws.stop();
 
         m_connected_url = u;
@@ -241,6 +247,7 @@ private:
                 }
             }
             else if(msg->type == ix::WebSocketMessageType::Open) {
+                m_intentional_close = false;
                 pending_message pm;
                 pm.type = pending_message::status_msg;
                 pm.data = "connected " + m_connected_url;
@@ -254,7 +261,7 @@ private:
                     + " " + msg->closeInfo.reason;
                 push_pending(std::move(pm));
 
-                if(0 < m_reconnect_interval_snapshot) {
+                if(0 < m_reconnect_interval_snapshot && !m_intentional_close.exchange(false)) {
                     pending_message rpm;
                     rpm.type = pending_message::reconnect_msg;
                     rpm.close_code = m_reconnect_interval_snapshot;
@@ -274,6 +281,7 @@ private:
 
     void do_disconnect() {
         m_reconnect_timer.stop();
+        m_intentional_close = true;
         m_ws.stop();
     }
 };
