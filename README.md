@@ -70,8 +70,8 @@ WebSocket client. Connects to a server, sends messages, and receives responses.
 
 ### Outlets
 
-- **Left**: Received messages (text → symbol, binary → int list)
-- **Right**: Status (`connected <url>`, `disconnected <code> <reason>`, `error <message>`)
+- **Left**: Text arrives as one symbol, as in earlier releases. With `@textmode bytes`, "hi" arrives as `text 104 105`. Binary remains an integer list in both modes.
+- **Right**: `connected <url>`, `disconnected <code> <reason bytes ...>`, `error <HTTP status> <reason bytes ...>`, or `queue_overflow`. Diagnostic text is limited to 256 bytes.
 
 ### Attributes
 
@@ -80,6 +80,8 @@ WebSocket client. Connects to a server, sends messages, and receives responses.
 | `@url` | symbol | `""` | WebSocket URL (`ws://` or `wss://`) |
 | `@auto_connect` | bool | `true` | Connect on load |
 | `@reconnect_interval` | int | `5000` | Reconnect interval in ms (`0` = disabled) |
+| `@textmode` | enum | `symbol` | Receive text as one symbol or as tagged UTF-8 `bytes` |
+| `@max_message_size` | int | `1048576` | Incoming bytes per message; 1–67108864, applied on connect |
 | `@binary` | bool | `false` | Send mode for typed messages |
 | `@subprotocol` | symbol | `""` | `Sec-WebSocket-Protocol` header |
 
@@ -100,7 +102,7 @@ WebSocket server. Accepts connections from browsers or other clients.
 
 ### Outlets
 
-- **Left**: Received messages (`<client_id> <message>`)
+- **Left**: Text arrives as `<client_id> <symbol>` by default, or `<client_id> text <UTF-8 byte ...>` with `@textmode bytes`. Binary remains `<client_id> <byte ...>` in both modes.
 - **Right**: Connection events (`connected <client_id>`, `disconnected <client_id>`)
 
 ### Attributes
@@ -108,12 +110,20 @@ WebSocket server. Accepts connections from browsers or other clients.
 | Attribute | Type | Default | Description |
 |---|---|---|---|
 | `@port` | int | `8080` | Listen port |
-| `@bind_ip` | symbol | `"0.0.0.0"` | Bind interface |
+| `@bind_ip` | symbol | `"0.0.0.0"` | Listens on **all interfaces**. Use `@bind_ip 127.0.0.1` for local patches. |
+| `@textmode` | enum | `symbol` | Receive text as one symbol or as tagged UTF-8 `bytes` |
+| `@max_message_size` | int | `1048576` | Incoming bytes per message per client; 1–67108864, applied on start |
 | `@max_clients` | int | `10` | Max concurrent connections |
 | `@tls` | bool | `false` | Enable WSS |
 | `@cert_file` | symbol | `""` | TLS certificate path |
 | `@key_file` | symbol | `""` | TLS private key path |
 | `@subprotocol` | symbol | `""` | `Sec-WebSocket-Protocol` |
+
+**For LAN or untrusted peers, use `@textmode bytes`.** Max retains each distinct symbol until Max quits. A per-message size limit does not bound the total number of symbols. Bytes mode also preserves embedded NUL characters, which Max symbols cannot represent.
+
+There are two independent limits. IXWebSocket closes the connection with code 1009 if a message exceeds `@max_message_size`. A message within that budget may still be too large for a Max byte list: the client supports 32767 payload bytes, the server 32766 for binary or 32765 for tagged text (the routing atoms also count). The entire message is then dropped, the connection stays open, and the status outlet emits `error list_too_long` (server: `error <client_id> list_too_long`). Symbol-mode text is not subject to the list limit.
+
+Each external buffers up to 64 undelivered events, shared across clients on the server. A full queue drops the oldest event and reports `queue_overflow` at most once per second. Larger transport limits can increase buffered memory; choose the smallest limit that fits the application.
 
 ## Project Structure
 

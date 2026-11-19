@@ -1,10 +1,12 @@
 #include "c74_min.h"
+#include "../../bbb/pending_queue.hpp"
 
 #pragma push_macro("NIL")
 #undef NIL
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <ixwebsocket/IXWebSocket.h>
 #include <ixwebsocket/IXNetSystem.h>
+#include "../../bbb/receive_policy.hpp"
 #pragma pop_macro("NIL")
 
 #include <mutex>
@@ -36,7 +38,7 @@ public:
 	};
 
 	attribute<symbol> bind_ip{this, "bind_ip", "0.0.0.0",
-		description{"Bind interface"}
+		description{"Bind interface (0.0.0.0 exposes all interfaces; use 127.0.0.1 for local patches)"}
 	};
 
 	attribute<int> max_clients{this, "max_clients", 10,
@@ -54,6 +56,16 @@ public:
 
 	attribute<symbol> key_file{this, "key_file", "",
 		description{"TLS private key file path"}
+	};
+
+	attribute<int, threadsafe::no, limit::clamp> max_message_size{this, "max_message_size", bbb::default_message_bytes,
+		description{"Maximum received bytes per message (applies on next start/connect)"},
+		range{1, bbb::maximum_message_bytes}
+	};
+
+	attribute<bbb::text_mode> textmode{this, "textmode", bbb::text_mode::symbol,
+		description{"Receive text as a symbol (default) or UTF-8 bytes (recommended for LAN peers)"},
+		enum_map{"symbol", "bytes"}
 	};
 
 	attribute<symbol> subprotocol{this, "subprotocol", "",
@@ -145,8 +157,7 @@ private:
 
 	int m_max_clients_snapshot{10};
 
-	std::vector<pending_message> m_pending;
-	std::mutex m_pending_mtx;
+	bbb::pending_queue<pending_message> m_pending;
 
 	queue<> m_queue{this, MIN_FUNCTION {
 		drain_pending();
@@ -162,10 +173,7 @@ private:
 
 	void push_pending(pending_message&& msg) {
 		if(m_shutting_down) return;
-		{
-			auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
-			m_pending.push_back(std::move(msg));
-		}
+		m_pending.push(std::move(msg));
 		m_queue.set();
 	}
 
@@ -191,8 +199,10 @@ private:
 
 		int port_val = static_cast<int>(port);
 		auto ip = to_string(bind_ip);
-		m_max_clients_snapshot = static_cast<int>(max_clients);
-		m_server = std::make_unique<ix::WebSocketServer>(port_val, ip);
+		m_max_clients_snapshot = std::clamp(max_clients.get(), 1, 1000);
+		m_server = std::make_unique<ix::WebSocketServer>(port_val, ip,
+			ix::SocketServer::kDefaultTcpBacklog, m_max_clients_snapshot);
+		bbb::configure_receive(*m_server, max_message_size.get());
 
 		if(static_cast<bool>(tls_attr)) {
 			ix::SocketTLSOptions tls_options;
@@ -210,53 +220,9 @@ private:
 				if(!ws) return;
 				uintptr_t key = reinterpret_cast<uintptr_t>(ws.get());
 				int id = m_next_id.fetch_add(1);
-				{
-				auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
-				if(static_cast<int>(m_id_to_ws.size()) >= m_max_clients_snapshot) {
-						ws->close(1013, "Max clients reached");
-						return;
-					}
-					m_ptr_to_id[key] = id;
-					m_id_to_ws[id] = ws_weak;
-				}
-				push_pending({pending_message::status, "connected", {}, id});
-			}
-		);
-
-		m_server->setOnClientMessageCallback(
-			[this](std::shared_ptr<ix::ConnectionState>, ix::WebSocket& ws, const ix::WebSocketMessagePtr& msg) {
-				if(m_shutting_down) return;
-
-				uintptr_t key = reinterpret_cast<uintptr_t>(&ws);
-
-				if(msg->type == ix::WebSocketMessageType::Message) {
-					int id = 0;
-					{
-						auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
-						auto it = m_ptr_to_id.find(key);
-						if(it == m_ptr_to_id.end()) return;
-						id = it->second;
-					}
-					if(msg->binary) {
-						std::vector<uint8_t> bytes(msg->str.begin(), msg->str.end());
-						push_pending({pending_message::client_binary, "", bytes, id});
-					}
-					else {
-						push_pending({pending_message::client_text, msg->str, {}, id});
-					}
-				}
-				else if(msg->type == ix::WebSocketMessageType::Close) {
-					int id = 0;
-					{
-						auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
-						auto it = m_ptr_to_id.find(key);
-						if(it == m_ptr_to_id.end()) return;
-						id = it->second;
-						m_ptr_to_id.erase(it);
-						m_id_to_ws.erase(id);
-					}
-					push_pending({pending_message::status, "disconnected", {}, id});
-				}
+				ws->setOnMessageCallback([this, ws_weak, id, key](const ix::WebSocketMessagePtr& msg) {
+					handle_message(ws_weak, id, key, msg);
+				});
 			}
 		);
 
@@ -265,8 +231,45 @@ private:
 			cerr << "bbb.ws.server: failed to listen on " << ip << ":" << port_val << endl;
 			return;
 		}
-
 		cout << "bbb.ws.server: listening on " << ip << ":" << port_val << endl;
+	}
+
+	void handle_message(std::weak_ptr<ix::WebSocket> ws_weak, int id, uintptr_t key,
+			const ix::WebSocketMessagePtr& msg) {
+		if(m_shutting_down) return;
+		if(msg->type == ix::WebSocketMessageType::Open) {
+			{
+				auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
+				m_ptr_to_id[key] = id;
+				m_id_to_ws[id] = ws_weak;
+			}
+			push_pending({pending_message::status, "connected", {}, id});
+		}
+
+		if(msg->type == ix::WebSocketMessageType::Message) {
+			{
+				auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
+				auto it = m_ptr_to_id.find(key);
+				if(it == m_ptr_to_id.end()) return;
+			}
+			if(msg->binary) {
+				std::vector<uint8_t> bytes(msg->str.begin(), msg->str.end());
+				push_pending({pending_message::client_binary, "", std::move(bytes), id});
+			}
+			else {
+				push_pending({pending_message::client_text, msg->str, {}, id});
+			}
+		}
+		else if(msg->type == ix::WebSocketMessageType::Close) {
+			{
+				auto lock = std::lock_guard<std::mutex>(m_clients_mtx);
+				auto it = m_ptr_to_id.find(key);
+				if(it == m_ptr_to_id.end()) return;
+				m_ptr_to_id.erase(it);
+				m_id_to_ws.erase(id);
+			}
+			push_pending({pending_message::status, "disconnected", {}, id});
+		}
 	}
 
 	void stop_server() {
@@ -338,22 +341,34 @@ private:
 	}
 
 	void drain_pending() {
-		std::vector<pending_message> msgs;
-		{
-			auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
-			msgs.swap(m_pending);
-		}
-		for(const auto& msg : msgs) {
+		auto batch = m_pending.drain();
+		if(batch.report_drops) status_out.send(symbol("queue_overflow"));
+		for(const auto& msg : batch.messages) {
 			switch(msg.type) {
 				case pending_message::client_text: {
+					if(textmode.get() == bbb::text_mode::symbol) {
+						message_out.send(msg.client_id, symbol(msg.data));
+						break;
+					}
+					if(!bbb::fits_byte_output(msg.data.size(), true, true)) {
+						status_out.send(symbol("error"), msg.client_id, symbol("list_too_long"));
+						break;
+					}
 					atoms a;
+					a.reserve(2 + msg.data.size());
 					a.push_back(atom(msg.client_id));
-					a.push_back(atom(symbol(msg.data)));
+					a.push_back(atom(symbol("text")));
+					for(unsigned char byte : msg.data) a.push_back(atom(static_cast<int>(byte)));
 					message_out.send(a);
 					break;
 				}
 				case pending_message::client_binary: {
+					if(!bbb::fits_byte_output(msg.bytes.size(), true, false)) {
+						status_out.send(symbol("error"), msg.client_id, symbol("list_too_long"));
+						break;
+					}
 					atoms a;
+					a.reserve(1 + msg.bytes.size());
 					a.push_back(atom(msg.client_id));
 					for(auto b : msg.bytes) {
 						a.push_back(atom(static_cast<int>(b)));

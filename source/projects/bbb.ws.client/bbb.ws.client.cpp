@@ -1,9 +1,11 @@
 #include "c74_min.h"
+#include "../../bbb/pending_queue.hpp"
 
 #pragma push_macro("NIL")
 #undef NIL
 #include <ixwebsocket/IXWebSocket.h>
 #include <ixwebsocket/IXNetSystem.h>
+#include "../../bbb/receive_policy.hpp"
 #pragma pop_macro("NIL")
 
 #include <mutex>
@@ -18,10 +20,10 @@ static std::string to_string(const symbol& s) {
 }
 
 struct pending_message {
-    enum type_t { text_msg, binary_msg, status_msg, reconnect_msg } type;
+    enum type_t { text_msg, binary_msg, connected, disconnected, error } type;
     std::string data;
     std::vector<std::uint8_t> bytes;
-    int close_code;
+    int close_code{};
 };
 
 class bbb_ws_client : public object<bbb_ws_client> {
@@ -49,6 +51,16 @@ public:
 
     attribute<bool> binary{this, "binary", false,
         description{"Send mode: text (0) or binary (1)"}
+    };
+
+    attribute<int, threadsafe::no, limit::clamp> max_message_size{this, "max_message_size", bbb::default_message_bytes,
+        description{"Maximum received bytes per message (applies on next start/connect)"},
+        range{1, bbb::maximum_message_bytes}
+    };
+
+    attribute<bbb::text_mode> textmode{this, "textmode", bbb::text_mode::symbol,
+        description{"Receive text as a symbol (default) or UTF-8 bytes (recommended for LAN peers)"},
+        enum_map{"symbol", "bytes"}
     };
 
     attribute<symbol> subprotocol{this, "subprotocol", "",
@@ -116,17 +128,14 @@ public:
 
 private:
     ix::WebSocket m_ws;
-    std::vector<pending_message> m_pending;
-    std::mutex m_pending_mtx;
+    bbb::pending_queue<pending_message> m_pending;
     std::atomic<bool> m_shutting_down{false};
-    // Set before an intentional m_ws.stop() (connect/disconnect/shutdown) so the
-    // resulting Close event does not schedule an auto-reconnect. Consumed by the
-    // Close handler and cleared on a successful Open, so a genuine unexpected
-    // drop still reconnects.
-    std::atomic<bool> m_intentional_close{false};
+    // Main-thread generation: queued events from a stopped socket cannot restart it.
+    std::uint64_t m_attempt{};
+    std::uint64_t m_timer_attempt{};
+    std::atomic<std::uint64_t> m_retry_attempt{};
 
     std::string m_connected_url;
-    int m_reconnect_interval_snapshot{0};
 
     timer<timer_options::defer_delivery> m_init_timer{this,
         MIN_FUNCTION {
@@ -139,38 +148,62 @@ private:
 
     timer<timer_options::defer_delivery> m_reconnect_timer{this,
         MIN_FUNCTION {
-            do_connect();
+            if(bbb::should_retry(m_timer_attempt, m_attempt, reconnect_interval.get())) do_connect();
             return {};
         }
     };
 
     queue<> m_queue{this,
         MIN_FUNCTION {
-            std::vector<pending_message> msgs;
-            {
-                auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
-                msgs.swap(m_pending);
-            }
-            for(const auto& msg : msgs) {
+            auto batch = m_pending.drain();
+            if(batch.report_drops) status_out.send(symbol("queue_overflow"));
+            for(const auto& msg : batch.messages) {
                 switch(msg.type) {
-                    case pending_message::text_msg:
-                        message_out.send(symbol(msg.data));
+                    case pending_message::text_msg: {
+                        if(textmode.get() == bbb::text_mode::symbol) {
+                            message_out.send(symbol(msg.data));
+                            break;
+                        }
+                        if(!bbb::fits_byte_output(msg.data.size(), false, true)) {
+                            status_out.send(symbol("error"), symbol("list_too_long"));
+                            break;
+                        }
+                        atoms text{symbol("text")};
+                        text.reserve(1 + msg.data.size());
+                        for(unsigned char byte : msg.data) text.push_back(static_cast<int>(byte));
+                        message_out.send(text);
                         break;
+                    }
                     case pending_message::binary_msg: {
+                        if(!bbb::fits_byte_output(msg.bytes.size(), false, false)) {
+                            status_out.send(symbol("error"), symbol("list_too_long"));
+                            break;
+                        }
                         atoms byte_list;
+                        byte_list.reserve(msg.bytes.size());
                         for(auto b : msg.bytes) {
                             byte_list.push_back(static_cast<int>(b));
                         }
                         message_out.send(byte_list);
                         break;
                     }
-                    case pending_message::status_msg:
-                        status_out.send(symbol(msg.data));
+                    case pending_message::connected:
+                        status_out.send(symbol("connected"), symbol(msg.data));
                         break;
-                    case pending_message::reconnect_msg:
-                        m_reconnect_timer.delay(msg.close_code);
+                    case pending_message::disconnected:
+                    case pending_message::error: {
+                        atoms status{symbol(msg.type == pending_message::error ? "error" : "disconnected"),
+                                     atom(msg.close_code)};
+                        for(unsigned char byte : msg.data) status.push_back(static_cast<int>(byte));
+                        status_out.send(status);
                         break;
+                    }
                 }
+            }
+            const auto retry = m_retry_attempt.exchange(0);
+            if(bbb::should_retry(retry, m_attempt, reconnect_interval.get())) {
+                m_timer_attempt = retry;
+                m_reconnect_timer.delay(reconnect_interval.get());
             }
             return {};
         }
@@ -178,10 +211,7 @@ private:
 
     void push_pending(pending_message&& msg) {
         if(m_shutting_down) return;
-        {
-            auto lock = std::lock_guard<std::mutex>(m_pending_mtx);
-            m_pending.push_back(std::move(msg));
-        }
+        m_pending.push(std::move(msg));
         m_queue.set();
     }
 
@@ -211,11 +241,11 @@ private:
             return;
         }
 
-        m_intentional_close = true;
+        const auto attempt = ++m_attempt;
         m_ws.stop();
 
         m_connected_url = u;
-        m_reconnect_interval_snapshot = static_cast<int>(reconnect_interval);
+        bbb::configure_receive(m_ws, max_message_size.get());
 
         m_ws.setUrl(u);
 
@@ -229,7 +259,7 @@ private:
             m_ws.setExtraHeaders({});
         }
 
-        m_ws.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
+        m_ws.setOnMessageCallback([this, attempt](const ix::WebSocketMessagePtr& msg) {
             if(m_shutting_down) return;
 
             if(msg->type == ix::WebSocketMessageType::Message) {
@@ -247,32 +277,31 @@ private:
                 }
             }
             else if(msg->type == ix::WebSocketMessageType::Open) {
-                m_intentional_close = false;
                 pending_message pm;
-                pm.type = pending_message::status_msg;
-                pm.data = "connected " + m_connected_url;
+                pm.type = pending_message::connected;
+                pm.data = m_connected_url;
                 push_pending(std::move(pm));
             }
             else if(msg->type == ix::WebSocketMessageType::Close) {
                 pending_message pm;
-                pm.type = pending_message::status_msg;
+                pm.type = pending_message::disconnected;
                 pm.close_code = msg->closeInfo.code;
-                pm.data = "disconnected " + std::to_string(msg->closeInfo.code)
-                    + " " + msg->closeInfo.reason;
+                pm.data = msg->closeInfo.reason.substr(0, 256);
                 push_pending(std::move(pm));
 
-                if(0 < m_reconnect_interval_snapshot && !m_intentional_close.exchange(false)) {
-                    pending_message rpm;
-                    rpm.type = pending_message::reconnect_msg;
-                    rpm.close_code = m_reconnect_interval_snapshot;
-                    push_pending(std::move(rpm));
-                }
             }
             else if(msg->type == ix::WebSocketMessageType::Error) {
                 pending_message pm;
-                pm.type = pending_message::status_msg;
-                pm.data = "error " + msg->errorInfo.reason;
+                pm.type = pending_message::error;
+                pm.data = msg->errorInfo.reason.substr(0, 256);
+                pm.close_code = msg->errorInfo.http_status;
                 push_pending(std::move(pm));
+            }
+            if(msg->type == ix::WebSocketMessageType::Close ||
+               (msg->type == ix::WebSocketMessageType::Error &&
+                m_ws.getReadyState() == ix::ReadyState::Closed)) {
+                m_retry_attempt = attempt;
+                m_queue.set();
             }
         });
 
@@ -281,7 +310,7 @@ private:
 
     void do_disconnect() {
         m_reconnect_timer.stop();
-        m_intentional_close = true;
+        ++m_attempt;
         m_ws.stop();
     }
 };
