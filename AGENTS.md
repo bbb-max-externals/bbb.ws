@@ -103,8 +103,8 @@ root CMakeLists.txt の `SUBDIRLIST` が自動認識する。
 
 ### Outlets
 
-- **Left**: 受信メッセージ (text → symbol, binary → int list)
-- **Right**: ステータス (`connected <url>`, `disconnected <code> <reason>`, `error <message>`)
+- **Left**: text → `text <UTF-8 bytes...>`、binary → int list。受信文字列を symbol 化しない。
+- **Right**: `connected <url>`、`disconnected <code> <reason bytes...>`、`error <HTTP status> <reason bytes...>`、`queue_overflow`
 
 ### Attributes
 
@@ -113,6 +113,7 @@ root CMakeLists.txt の `SUBDIRLIST` が自動認識する。
 | `@url` | symbol | `""` | 接続先 (`ws://` or `wss://`) |
 | `@auto_connect` | bool | `true` | ロード時自動接続 |
 | `@reconnect_interval` | int | `5000` | 再接続間隔 ms。`0` で無効 |
+| `@max_message_size` | int | `16384` | 受信サイズ上限（bytes、次の接続から） |
 | `@binary` | bool | `false` | anything メッセージの送信モード |
 | `@subprotocol` | symbol | `""` | `Sec-WebSocket-Protocol` |
 
@@ -141,7 +142,7 @@ IXWebSocket BG thread              Max main thread
 
 ### Outlets
 
-- **Left**: 受信メッセージ (`<client_id> <message>`)
+- **Left**: テキストは `<client_id> text <UTF-8 bytes...>`、バイナリは `<client_id> <bytes...>`。
 - **Right**: 接続イベント (`connected <client_id>`, `disconnected <client_id>`)
 
 ### Attributes
@@ -149,7 +150,8 @@ IXWebSocket BG thread              Max main thread
 | 属性 | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `@port` | int | `8080` | リスンポート |
-| `@bind_ip` | symbol | `"0.0.0.0"` | バインドIF |
+| `@bind_ip` | symbol | `"0.0.0.0"` | 全インターフェースで待ち受ける。ローカル限定なら `127.0.0.1` |
+| `@max_message_size` | int | `16384` | 受信サイズ上限（bytes、次の start から） |
 | `@max_clients` | int | `10` | 最大同時接続数 |
 | `@tls` | bool | `false` | WSS 有効化 |
 | `@cert_file` | symbol | `""` | TLS 証明書パス |

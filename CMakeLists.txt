@@ -54,6 +54,15 @@ endforeach()
 
 if(BBB_WS_BUILD_TESTS)
 	enable_testing()
+	set(CMAKE_EXE_LINKER_FLAGS "")
+	foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+		set(CMAKE_EXE_LINKER_FLAGS_${config} "")
+	endforeach()
+	add_executable(bbb_ws_receive_tests tests/receive_tests.cpp)
+	target_compile_features(bbb_ws_receive_tests PRIVATE cxx_std_17)
+	target_link_libraries(bbb_ws_receive_tests PRIVATE ixwebsocket)
+	add_test(NAME bbb_ws_receive_tests COMMAND bbb_ws_receive_tests)
+	set_tests_properties(bbb_ws_receive_tests PROPERTIES TIMEOUT 25)
 	find_program(NODE_EXECUTABLE node REQUIRED)
 	add_test(
 		NAME bbb_ws_loopback_tests
