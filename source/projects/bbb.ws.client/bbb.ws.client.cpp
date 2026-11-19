@@ -53,9 +53,14 @@ public:
         description{"Send mode: text (0) or binary (1)"}
     };
 
-    attribute<int> max_message_size{this, "max_message_size", 16384,
+    attribute<int, threadsafe::no, limit::clamp> max_message_size{this, "max_message_size", bbb::default_message_bytes,
         description{"Maximum received bytes per message (applies on next start/connect)"},
-        range{1, 16384}
+        range{1, bbb::maximum_message_bytes}
+    };
+
+    attribute<bbb::text_mode> textmode{this, "textmode", bbb::text_mode::symbol,
+        description{"Receive text as a symbol (default) or UTF-8 bytes (recommended for LAN peers)"},
+        enum_map{"symbol", "bytes"}
     };
 
     attribute<symbol> subprotocol{this, "subprotocol", "",
@@ -155,13 +160,27 @@ private:
             for(const auto& msg : batch.messages) {
                 switch(msg.type) {
                     case pending_message::text_msg: {
+                        if(textmode.get() == bbb::text_mode::symbol) {
+                            message_out.send(symbol(msg.data));
+                            break;
+                        }
+                        if(!bbb::fits_byte_output(msg.data.size(), false, true)) {
+                            status_out.send(symbol("error"), symbol("list_too_long"));
+                            break;
+                        }
                         atoms text{symbol("text")};
+                        text.reserve(1 + msg.data.size());
                         for(unsigned char byte : msg.data) text.push_back(static_cast<int>(byte));
                         message_out.send(text);
                         break;
                     }
                     case pending_message::binary_msg: {
+                        if(!bbb::fits_byte_output(msg.bytes.size(), false, false)) {
+                            status_out.send(symbol("error"), symbol("list_too_long"));
+                            break;
+                        }
                         atoms byte_list;
+                        byte_list.reserve(msg.bytes.size());
                         for(auto b : msg.bytes) {
                             byte_list.push_back(static_cast<int>(b));
                         }

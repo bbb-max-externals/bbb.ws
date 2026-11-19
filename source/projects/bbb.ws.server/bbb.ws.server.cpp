@@ -58,9 +58,14 @@ public:
 		description{"TLS private key file path"}
 	};
 
-	attribute<int> max_message_size{this, "max_message_size", 16384,
+	attribute<int, threadsafe::no, limit::clamp> max_message_size{this, "max_message_size", bbb::default_message_bytes,
 		description{"Maximum received bytes per message (applies on next start/connect)"},
-		range{1, 16384}
+		range{1, bbb::maximum_message_bytes}
+	};
+
+	attribute<bbb::text_mode> textmode{this, "textmode", bbb::text_mode::symbol,
+		description{"Receive text as a symbol (default) or UTF-8 bytes (recommended for LAN peers)"},
+		enum_map{"symbol", "bytes"}
 	};
 
 	attribute<symbol> subprotocol{this, "subprotocol", "",
@@ -341,7 +346,16 @@ private:
 		for(const auto& msg : batch.messages) {
 			switch(msg.type) {
 				case pending_message::client_text: {
+					if(textmode.get() == bbb::text_mode::symbol) {
+						message_out.send(msg.client_id, symbol(msg.data));
+						break;
+					}
+					if(!bbb::fits_byte_output(msg.data.size(), true, true)) {
+						status_out.send(symbol("error"), msg.client_id, symbol("list_too_long"));
+						break;
+					}
 					atoms a;
+					a.reserve(2 + msg.data.size());
 					a.push_back(atom(msg.client_id));
 					a.push_back(atom(symbol("text")));
 					for(unsigned char byte : msg.data) a.push_back(atom(static_cast<int>(byte)));
@@ -349,7 +363,12 @@ private:
 					break;
 				}
 				case pending_message::client_binary: {
+					if(!bbb::fits_byte_output(msg.bytes.size(), true, false)) {
+						status_out.send(symbol("error"), msg.client_id, symbol("list_too_long"));
+						break;
+					}
 					atoms a;
+					a.reserve(1 + msg.bytes.size());
 					a.push_back(atom(msg.client_id));
 					for(auto b : msg.bytes) {
 						a.push_back(atom(static_cast<int>(b)));

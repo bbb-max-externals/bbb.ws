@@ -9,6 +9,11 @@
 
 using namespace std::chrono_literals;
 
+static_assert(bbb::fits_byte_output(32767, false, false) && !bbb::fits_byte_output(32768, false, false));
+static_assert(bbb::fits_byte_output(32767, false, true) && !bbb::fits_byte_output(32768, false, true));
+static_assert(bbb::fits_byte_output(32766, true, false) && !bbb::fits_byte_output(32767, true, false));
+static_assert(bbb::fits_byte_output(32765, true, true) && !bbb::fits_byte_output(32766, true, true));
+
 bool test_queue() {
     bbb::pending_queue<int> queue;
     const auto now = decltype(queue)::clock::now();
@@ -58,10 +63,17 @@ bool test_limit(bool server_limit) {
 
 int main() {
     ix::initNetSystem();
+    const bool transport_budget = [] {
+        ix::WebSocket client;
+        ix::WebSocketServer server(0, "127.0.0.1");
+        bbb::configure_receive(client, bbb::default_message_bytes);
+        bbb::configure_receive(server, bbb::maximum_message_bytes);
+        return client.getMaxMessageSize() == 1048576 && server.getMaxMessageSize() == 67108864;
+    }();
     const bool queue = test_queue(), server = test_limit(true), client = test_limit(false);
     ix::uninitNetSystem();
     std::cout << "queue=" << queue << " server-limit=" << server << " client-limit=" << client << '\n';
     const bool retry = !bbb::should_retry(1, 1, 0) && !bbb::should_retry(1, 2, 100) &&
                        bbb::should_retry(2, 2, 100);
-    return queue && server && client && retry ? 0 : 1;
+    return queue && server && client && retry && transport_budget ? 0 : 1;
 }
